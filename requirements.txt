@@ -1,0 +1,7 @@
+flask
+requests
+dnspython
+python-whois
+beautifulsoup4
+werkzeug
+gunicorn
