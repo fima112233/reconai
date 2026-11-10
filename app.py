@@ -595,4 +595,293 @@ ADMIN_HTML = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewp
   </div>
 
   <div class="section">
-   
+    <h2>Последние логи</h2>
+    <table>
+      <tr><th>Время</th><th>User</th><th>Действие</th><th>Деталь</th><th>IP</th></tr>
+      {% for l in logs %}
+      <tr><td>{{ l.ts[:19] }}</td><td>{{ l.user_id }}</td><td>{{ l.action }}</td><td>{{ l.detail }}</td><td>{{ l.ip }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <a href="/" class="btn btn-ghost">← В чат</a> · <a href="/profile" class="btn btn-ghost">Профиль</a>
+</div></body></html>
+"""
+
+@app.route("/admin")
+@admin_required
+def admin_page():
+    users = sorted(DB["users"].values(), key=lambda u: u["id"])
+    rows = [dict(u, usage=get_usage(u["id"])) for u in users]
+    logs = list(reversed(DB["logs"]))[:100]
+    return render_template_string(ADMIN_HTML, users=rows, logs=logs)
+
+@app.route("/admin/ban/<int:uid>", methods=["POST"])
+@admin_required
+def admin_ban(uid):
+    u = get_user(uid)
+    if not u or u["role"] == "admin":
+        return redirect(url_for("admin_page"))
+    reason = request.form.get("reason","").strip() or "нарушение правил"
+    with LOCK:
+        u["banned"] = 1
+        u["ban_reason"] = reason
+    save_db()
+    log_action(current_user()["id"], "ban", f"uid={uid} reason={reason}")
+    return redirect(url_for("admin_page"))
+
+@app.route("/admin/unban/<int:uid>", methods=["POST"])
+@admin_required
+def admin_unban(uid):
+    u = get_user(uid)
+    if not u: return redirect(url_for("admin_page"))
+    with LOCK:
+        u["banned"] = 0
+        u["ban_reason"] = None
+    save_db()
+    log_action(current_user()["id"], "unban", f"uid={uid}")
+    return redirect(url_for("admin_page"))
+
+# ============================================================
+# MAIN CHAT
+# ============================================================
+CHAT_CSS = BASE_CSS + r"""
+body{height:100vh;display:flex;overflow:hidden}
+#sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;flex-shrink:0}
+#sidebar .brand{padding:16px;font-size:15px;font-weight:700;color:#fff;
+  border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+#sidebar .brand .logo{width:26px;height:26px;border-radius:8px;
+  background:linear-gradient(135deg,var(--accent),#3fb950);display:flex;
+  align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff}
+#newchat{margin:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;
+  background:transparent;color:var(--text);cursor:pointer;font-size:13px;text-align:left;
+  transition:background .15s}
+#newchat:hover{background:var(--bg3)}
+#history{flex:1;overflow-y:auto;padding:0 8px}
+.chat-item{padding:10px 12px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--text2);
+  margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-item:hover{background:var(--bg3)}
+.chat-item.active{background:var(--bg3);color:var(--text)}
+#sidebar .foot{padding:10px 12px;border-top:1px solid var(--border);font-size:12px;
+  color:var(--text2);display:flex;justify-content:space-between;align-items:center;gap:6px}
+#sidebar .foot a{color:var(--accent);font-size:12px}
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#topbar{padding:14px 20px;border-bottom:1px solid var(--border);font-size:14px;
+  color:var(--text2);font-weight:500;display:flex;justify-content:space-between;align-items:center}
+#topbar .title{color:var(--text);font-weight:600}
+#topbar .usage{color:var(--text2);font-size:13px;padding:4px 10px;background:var(--bg3);border-radius:20px}
+#chat{flex:1;overflow-y:auto;padding:24px 20px}
+.user-msg{display:flex;justify-content:flex-end;margin-bottom:20px;max-width:720px;margin-left:auto;margin-right:auto}
+.user-bubble{background:var(--accent);color:#fff;padding:10px 16px;border-radius:18px 18px 4px 18px;font-size:14px;max-width:80%}
+.bot-msg{max-width:720px;margin:0 auto 20px}
+.bot-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;color:var(--text2);font-weight:600}
+.bot-avatar{width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#3fb950);
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;font-weight:800}
+.bot-body{font-size:14px;line-height:1.6}
+details{border:1px solid var(--border);border-radius:10px;margin:8px 0;overflow:hidden;background:var(--bg2)}
+summary{padding:9px 14px;cursor:pointer;font-weight:600;font-size:13px;color:var(--text);
+  list-style:none;display:flex;align-items:center;gap:6px;transition:background .15s}
+summary::-webkit-details-marker{display:none}
+summary:hover{background:var(--bg3)}
+summary::before{content:'▸';color:var(--text2);display:inline-block;transition:transform .15s}
+details[open] summary::before{transform:rotate(90deg)}
+pre{margin:0;padding:12px 14px;font-size:12px;font-family:ui-monospace,SFMono-Regular,monospace;
+  white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;
+  color:#d4d4d4;border-top:1px solid var(--border);background:#0a0e13}
+.status{color:var(--text2);font-size:13px;margin:4px 0}
+.status.ok{color:#3fb950}
+.status.fail{color:var(--red)}
+.btn-txt{display:inline-flex;align-items:center;gap:6px;margin:8px 0;padding:8px 16px;
+  border-radius:8px;border:1px solid var(--border);background:var(--bg3);color:var(--text);
+  cursor:pointer;font-size:13px;font-weight:500;transition:background .15s}
+.btn-txt:hover{background:var(--border)}
+#input-wrap{padding:16px 20px 24px;max-width:720px;margin:0 auto;width:100%}
+#input-box{display:flex;align-items:flex-end;gap:8px;background:var(--bg2);
+  border-radius:26px;padding:8px 8px 8px 18px;border:1px solid var(--border);
+  transition:border-color .15s,box-shadow .15s}
+#input-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px rgba(16,163,127,.15)}
+#inp{flex:1;background:transparent;border:none;outline:none;color:var(--text);
+  font-size:14px;padding:8px 0;font-family:inherit}
+#inp::placeholder{color:var(--text2)}
+#send{width:34px;height:34px;border-radius:50%;border:none;background:var(--accent);
+  color:#fff;cursor:pointer;font-size:16px;display:flex;align-items:center;
+  justify-content:center;flex-shrink:0}
+#send:hover{background:var(--accent2)}
+#send:disabled{opacity:.4;cursor:not-allowed}
+.typing{color:var(--text2);font-size:13px}
+.typing::after{content:'';animation:dots 1.4s steps(4,end) infinite}
+@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+@media(max-width:700px){#sidebar{display:none}#topbar .usage{display:none}}
+"""
+
+HTML = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Recon AI</title><style>" + CHAT_CSS + """
+</style></head>
+<body>
+<aside id="sidebar">
+  <div class="brand"><div class="logo">R</div> Recon AI</div>
+  <button id="newchat" onclick="newChat()">＋ Новый пробив</button>
+  <div id="history"></div>
+  <div class="foot">
+    <span>{{ username }}{% if role=='admin' %} · admin{% endif %}</span>
+    <span><a href="/profile">Профиль</a></span>
+  </div>
+</aside>
+<main id="main">
+  <div id="topbar">
+    <span class="title" id="chat-title">Новый чат</span>
+    <span class="usage" id="usage-label">0 / {{ limit }}</span>
+  </div>
+  <div id="chat"></div>
+  <div id="input-wrap">
+    <div id="input-box">
+      <input id="inp" placeholder="Введи домен, например example.com" autofocus autocomplete="off">
+      <button id="send" onclick="sendMsg()">↑</button>
+    </div>
+  </div>
+</main>
+<script>
+const chat=document.getElementById('chat'),inp=document.getElementById('inp'),btn=document.getElementById('send');
+const historyEl=document.getElementById('history'),titleEl=document.getElementById('chat-title');
+const usageLabel=document.getElementById('usage-label');
+let chats=[];let activeId=null;
+let used={{ usage }};
+const LIMIT={{ limit }};
+
+function refreshUsage(){usageLabel.textContent=used+' / '+LIMIT}
+function uid(){return Math.random().toString(36).slice(2,9)}
+function renderHistory(){
+  historyEl.innerHTML='';
+  chats.forEach(c=>{
+    const el=document.createElement('div');
+    el.className='chat-item'+(c.id===activeId?' active':'');
+    el.textContent=c.title;
+    el.onclick=()=>{activeId=c.id;renderHistory();renderChat()};
+    historyEl.appendChild(el);
+  });
+}
+function renderChat(){
+  chat.innerHTML='';
+  const c=chats.find(x=>x.id===activeId);
+  if(!c){titleEl.textContent='Новый чат';return}
+  titleEl.textContent=c.title;
+  c.messages.forEach(m=>{
+    if(m.role==='user'){
+      const w=document.createElement('div');w.className='user-msg';
+      const b=document.createElement('div');b.className='user-bubble';b.textContent=m.text;
+      w.appendChild(b);chat.appendChild(w);
+    }else{
+      const w=document.createElement('div');w.className='bot-msg';
+      const h=document.createElement('div');h.className='bot-head';
+      h.innerHTML='<div class="bot-avatar">R</div> Recon AI';
+      const body=document.createElement('div');body.className='bot-body';
+      body.innerHTML=m.html;
+      w.appendChild(h);w.appendChild(body);chat.appendChild(w);
+    }
+  });
+  chat.scrollTop=chat.scrollHeight;
+}
+function newChat(){activeId=null;titleEl.textContent='Новый чат';chat.innerHTML='';renderHistory();inp.value='';inp.focus()}
+function ensureChat(domain){
+  if(activeId){return chats.find(c=>c.id===activeId)}
+  const c={id:uid(),title:'Пробив '+domain,domain,messages:[]};
+  chats.unshift(c);activeId=c.id;renderHistory();titleEl.textContent=c.title;
+  return c;
+}
+async function sendMsg(){
+  const val=inp.value.trim();if(!val)return;
+  if(used>=LIMIT){alert('Лимит '+LIMIT+' запросов в день исчерпан. Попробуйте завтра.');return}
+  inp.value='';btn.disabled=true;
+  const domain=val.replace(/^https?:\\/\\//,'').split('/')[0].toLowerCase();
+  const c=ensureChat(domain);
+  c.messages.push({role:'user',text:val});
+  renderChat();
+  const typingWrap=document.createElement('div');typingWrap.className='bot-msg';
+  typingWrap.innerHTML='<div class="bot-head"><div class="bot-avatar">R</div> Recon AI</div><div class="bot-body"><span class="typing">Анализирую '+domain+'</span></div>';
+  chat.appendChild(typingWrap);chat.scrollTop=chat.scrollHeight;
+  try{
+    const r=await fetch('/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain})});
+    const data=await r.json();
+    typingWrap.remove();
+    if(data.error){
+      c.messages.push({role:'bot',html:'<div class="status fail">'+escapeHtml(data.error)+'</div>'});
+    }else{
+      used=data.usage;refreshUsage();
+      let html='';
+      const total=Object.keys(data.results).length;
+      const okCount=Object.values(data.results).filter(v=>!v.data||!v.data.error).length;
+      html+='<div class="status ok">Готово: '+okCount+'/'+total+' модулей ответили.</div>';
+      html+='<details><summary>Показать все ('+total+' модулей)</summary>';
+      for(const [k,v] of Object.entries(data.results)){
+        const body=typeof v.data==='string'?v.data:JSON.stringify(v.data,null,2);
+        html+='<details style="margin:4px 0 4px 12px"><summary style="font-size:12px;padding:6px 10px">'+escapeHtml(v.label)+'</summary><pre style="max-height:250px">'+escapeHtml(body)+'</pre></details>';
+      }
+      html+='</details>';
+      html+='<div><button class="btn-txt" onclick="downloadTxt(\\''+escapeHtml(domain)+'\\')">📄 Скачать отчёт TXT (полный)</button></div>';
+      c.messages.push({role:'bot',html});
+    }
+  }catch(e){
+    typingWrap.remove();
+    c.messages.push({role:'bot',html:'<div class="status fail">'+escapeHtml(e.message)+'</div>'});
+  }
+  renderChat();btn.disabled=false;inp.focus();
+}
+async function downloadTxt(domain){
+  const r=await fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain})});
+  const blob=await r.blob();
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='recon_'+domain+'.txt';a.click();
+}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMsg()}});
+refreshUsage();renderHistory();inp.focus();
+</script>
+</body></html>
+"""
+
+@app.route("/")
+@login_required
+def index():
+    u = current_user()
+    return render_template_string(HTML, username=u["username"], role=u["role"],
+                                  usage=get_usage(u["id"]), limit=DAILY_LIMIT)
+
+@app.route("/scan", methods=["POST"])
+@login_required
+def scan():
+    u = current_user()
+    if get_usage(u["id"]) >= DAILY_LIMIT:
+        return jsonify({"error": f"Лимит {DAILY_LIMIT} запросов в день исчерпан. Попробуйте завтра."})
+    data=request.get_json(force=True)
+    domain=data.get("domain","").strip().lower()
+    domain=domain.replace("https://","").replace("http://","").split("/")[0]
+    if not domain or "." not in domain:
+        return jsonify({"error":"Нужен домен, например example.com"})
+    inc_usage(u["id"])
+    log_action(u["id"], "scan", domain, ip=client_ip())
+    return jsonify({"results":run_all(domain), "usage": get_usage(u["id"])})
+
+@app.route("/report", methods=["POST"])
+@login_required
+def report():
+    u = current_user()
+    if get_usage(u["id"]) >= DAILY_LIMIT:
+        return "Лимит исчерпан", 429
+    data=request.get_json(force=True)
+    domain=data.get("domain","").strip().lower()
+    domain=domain.replace("https://","").replace("http://","").split("/")[0]
+    inc_usage(u["id"])
+    log_action(u["id"], "report", domain, ip=client_ip())
+    results=run_all(domain)
+    txt=make_txt_report(domain, results)
+    buf=io.BytesIO(txt.encode("utf-8"));buf.seek(0)
+    return send_file(buf, mimetype="text/plain", as_attachment=True,
+                     download_name=f"recon_{domain}.txt")
+
+# ============================================================
+# START
+# ============================================================
+load_db()
+
+if __name__=="__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT","5000")), debug=False)
