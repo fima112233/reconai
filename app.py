@@ -1,5 +1,4 @@
 # app.py — Recon AI for Render
-# pip install -r requirements.txt
 # ENV: ADMIN_PASSWORD (обязательно), SECRET_KEY (обязательно)
 import json, socket, ssl, whois, dns.resolver, requests, io, os, threading, sys
 from datetime import date, datetime
@@ -10,17 +9,15 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# ENV CONFIG — без дефолтов для секретов
+# ENV CONFIG
 # ============================================================
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 
 if not ADMIN_PASSWORD:
-    print("[FATAL] ADMIN_PASSWORD не задан в Environment.", file=sys.stderr)
-    sys.exit(1)
+    print("[FATAL] ADMIN_PASSWORD не задан в Environment.", file=sys.stderr); sys.exit(1)
 if not SECRET_KEY:
-    print("[FATAL] SECRET_KEY не задан в Environment.", file=sys.stderr)
-    sys.exit(1)
+    print("[FATAL] SECRET_KEY не задан в Environment.", file=sys.stderr); sys.exit(1)
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -544,7 +541,7 @@ td:last-child{white-space:nowrap}
 .ban-form button:hover{background:var(--red)}
 .unban-btn{padding:6px 12px;border-radius:6px;font-size:12px;background:var(--accent);color:#fff}
 .unban-btn:hover{background:var(--accent2)}
-@media(max-width:600px){.admin-head h1{font-size:20px}.section{padding:14px}}
+@media(max-width:600px){ .admin-head h1{font-size:20px} .section{padding:14px} }
 """
 
 ADMIN_HTML = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Админ — Recon AI</title><style>" + ADMIN_CSS + """
@@ -712,7 +709,7 @@ pre{margin:0;padding:12px 14px;font-size:12px;font-family:ui-monospace,SFMono-Re
 .typing{color:var(--text2);font-size:13px}
 .typing::after{content:'';animation:dots 1.4s steps(4,end) infinite}
 @keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
-@media(max-width:700px){#sidebar{display:none}#topbar .usage{display:none}}
+@media(max-width:700px){ #sidebar{display:none} #topbar .usage{display:none} }
 """
 
 HTML = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Recon AI</title><style>" + CHAT_CSS + """
